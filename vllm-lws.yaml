@@ -1,0 +1,99 @@
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+      spec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-A100-PCIE-40GB
+        containers:
+          - name: vllm-leader
+            image: vllm/vllm-openai:v0.8.3
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                value: <your-hf-token>
+            command:
+              - sh
+              - -c
+              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE);
+                python3 -m vllm.entrypoints.openai.api_server --port 8080 --model Qwen/Qwen2.5-3B-Instruct --tensor-parallel-size 1 --pipeline_parallel_size 2"
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+                cpu: 1250m
+                memory: 24Gi
+                ephemeral-storage: 80Gi
+              requests:
+                cpu: 125m
+                memory: 2Gi
+                ephemeral-storage: 80Gi
+            ports:
+              - containerPort: 8080
+            readinessProbe:
+              tcpSocket:
+                port: 8080
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+        volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 15Gi
+    workerTemplate:
+      spec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-A100-PCIE-40GB
+        containers:
+          - name: vllm-worker
+            image: vllm/vllm-openai:v0.8.3
+            command:
+              - sh
+              - -c
+              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS)"
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+                cpu: 1250m
+                memory: 24Gi
+                ephemeral-storage: 80Gi
+              requests:
+                cpu: 125m
+                memory: 2Gi
+                ephemeral-storage: 80Gi
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                value: <your-hf-token>
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+        volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 15Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-leader
+spec:
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    leaderworkerset.sigs.k8s.io/name: vllm
+    role: leader
+  type: ClusterIP
